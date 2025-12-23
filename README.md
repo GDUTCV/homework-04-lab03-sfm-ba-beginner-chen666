@@ -23,3 +23,7 @@ To visualize, run:
 ```bash
 python visualize.py --dataset mini-temple  # visualize 3d point cloud from reconstruction.
 ```
+# 作业要求的pdf在主文件夹内，因为环境问题仅使用终端配置的环境并运行代码，所以在我的pycharm界面中并未配置解释器
+### 读取优化后的图像执行这个操作
+ python visualize.py --dataset mini-temple --ba 
+### 因为优化的数据保存的文件夹不一样

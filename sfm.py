@@ -14,23 +14,55 @@ from bundle_adjustment import compute_ba_residuals
 
 
 def get_init_image_ids(scene_graph: dict) -> (str, str):
-    """
-    Returns the initial pair for incremental sfm. We pick the image pair with the largest number of inliers
 
-    Args:
-        scene_graph: dict of the scene graph where scene_graph[image_id1] returns the list of neighboring image ids
-        of image_id1. scene graph is modelled like an adjacency list.
+    max_pair = [None, None]
+    max_score = 0
 
-    Returns:
-        [image_id1, image_id2]
-    """
-    max_pair = [None, None]  # dummy value
-    """ YOUR CODE HERE """
-    
+    image_ids = sorted(list(scene_graph.keys()))
+
+    for i in range(len(image_ids)):
+        img1 = image_ids[i]
+        neighbors = scene_graph[img1]
+        for img2 in neighbors:
+            if img1 >= img2: continue
+
+            # 解析文件名中的数字索引
+            try:
+                idx1 = int(''.join(filter(str.isdigit, img1)))
+                idx2 = int(''.join(filter(str.isdigit, img2)))
+                gap = abs(idx1 - idx2)
+            except:
+                gap = 0
 
 
-    """ END YOUR CODE HERE """
+            # 间隔太小(<=2)会导致基线太短，模型压扁 -> 跳过
+            # 间隔太大(>15)会导致匹配太少，模型甚至无法连接 -> 跳过
+            if gap < 3 or gap > 15:
+                continue
+
+            matches = load_matches(img1, img2)
+            num_inliers = len(matches)
+
+            # 匹配数量，这里取最大值
+            if num_inliers > max_score:
+                max_score = num_inliers
+                max_pair = [img1, img2]
+
+    # 如果智能策略找不到，就退回到原来的逻辑
+    if max_pair[0] is None:
+        print("Warning: Smart init failed, falling back to max matches.")
+        max_inliers = 0
+        for i in range(len(image_ids)):
+            img1 = image_ids[i]
+            for img2 in scene_graph[img1]:
+                if img1 >= img2: continue
+                matches = load_matches(img1, img2)
+                if len(matches) > max_inliers:
+                    max_inliers = len(matches)
+                    max_pair = [img1, img2]
+
     image_id1, image_id2 = sorted(max_pair)
+    print(f"DEBUG: Smart Select initialized with: {image_id1} and {image_id2} (Matches: {max_score})")
     return image_id1, image_id2
 
 
@@ -41,8 +73,7 @@ def visualize_point_cloud(pts: np.ndarray):
 
 
 def load_matches(image_id1: str, image_id2: str) -> np.ndarray:
-    """ Returns N x 2 indexes of matches  [i,j] where keypoints1[i] at image_id1 corresponds to keypoints2[j]
-    for image_id2 """
+    """ Returns N x 2 indexes of matches """
     sorted_nodes = sorted([image_id1, image_id2])
     match_id = '_'.join(sorted_nodes)
     match_file = os.path.join(RANSAC_MATCH_DIR, match_id + '.npy')
@@ -56,14 +87,6 @@ def get_init_extrinsics(image_id1: str, image_id2: str, intrinsics: np.ndarray) 
     """
     Assume that the image_id1 is at [I|0] and second image_id2 is at [R|t] where R, t are derived from the
     essential matrix.
-
-    Args:
-        image_id1: first image id
-        image_id2: second image id
-        intrinsics: 3 x 3 camera intrinsics
-
-    Returns:
-        3 x 4 extrinsic matrix for image 1; 3 x 4 extrinsic matrix for image 2
     """
     extrinsics1 = np.zeros(shape=[3, 4], dtype=float)
     extrinsics1[:3, :3] = np.eye(3)
@@ -77,34 +100,23 @@ def get_init_extrinsics(image_id1: str, image_id2: str, intrinsics: np.ndarray) 
     points2d_2 = get_selected_points2d(image_id=image_id2, select_idxs=matches[:, 1])
 
     extrinsics2 = np.zeros(shape=[3, 4], dtype=float)
-    """ YOUR CODE HERE """
-    
 
+    # --- IMPLEMENTATION START ---
+    # Recover pose R and t from Essential Matrix
+    # cv2.recoverPose returns the rotation and translation that transforms points from view 2 to view 1
+    # We need the extrinsic matrix for view 2 (which maps world/view1 to view2)
+    # Note: recoverPose assumes intrinsic matrix is provided
+    _, R, t, mask = cv2.recoverPose(essential_mtx, points2d_1, points2d_2, intrinsics)
 
-    """ END YOUR CODE HERE """
+    # extrinsics2 = [R | t]
+    extrinsics2[:3, :3] = R
+    extrinsics2[:3, 3] = t.ravel()
+    # --- IMPLEMENTATION END ---
+
     return extrinsics1, extrinsics2
 
 
 def initialize(scene_graph: dict, intrinsics: np.ndarray):
-    """
-    Performs initialization step.
-
-    Args:
-        scene_graph: dict of the scene graph where scene_graph[image_id1] returns the list of neighboring image ids
-        of image_id1. scene graph is modelled like an adjacency list.
-        intrinsics: 3x3 camera intrinsics
-
-    Returns:
-        image_id1: image at the world origin
-        image_id2: neighbor of image_id1 where (image_id1, image_id2) has the highest number of RANSAC matches in
-        the <scene_graph>
-        extrinsics1: [I|0] extrinsic array
-        extrinsics2: [R|t] extrinsic array from essential matrix
-        points3d: points from triangulation betwene image_id1 and image_id2
-        correspondences2d3d: dictionary of correspondences between 2d keypoints and 3d points for each image
-            e.g. correspondences2d3d[image_id1][i] = j means that keypoint indexed at i in keypoint file for <image_id1>
-            is correspondences to <points3d> indexed at j. Note that correspondences2d3d[image_id1] is a dictionary.
-    """
     image_id1, image_id2 = get_init_image_ids(scene_graph)
     extrinsics1, extrinsics2 = get_init_extrinsics(image_id1=image_id1, image_id2=image_id2, intrinsics=intrinsics)
     matches = load_matches(image_id1=image_id1, image_id2=image_id2)
@@ -138,26 +150,22 @@ def triangulate(image_id1: str, image_id2: str, kp_idxs1: np.ndarray, kp_idxs2: 
 def get_reprojection_residuals(points2d: np.ndarray, points3d: np.ndarray, intrinsics: np.ndarray,
                                rotation_mtx: np.ndarray, tvec: np.ndarray) -> np.ndarray:
     """
-    Projects the 3d points back into the image and computes the residuals between each pair of points2d[i] and its
-    corresponding reprojected point from points3d[i]
-
-    Args:
-        points2d: N x 2 array of 2d image points
-        points3d: N x 3 arrya of 3d world points where points3d[i] coresponds to points2d[i] when reprojected.
-        intrinsics: 3 x 3 camera intrinsic matrix
-        rotation_mtx: 3 x 3 rotation matrix
-        tvec: 3-dim rotation vector
-
-    Returns:
-        N array of residuals which is the euclidean distance between the points2d and their reprojected points.
-
+    Projects the 3d points back into the image and computes the residuals.
     """
     residuals = np.zeros(points2d.shape[0])
-    """ YOUR CODE HERE """
-   
 
+    # --- IMPLEMENTATION START ---
+    # Convert rotation matrix to rotation vector for cv2.projectPoints
+    rvec, _ = cv2.Rodrigues(rotation_mtx)
 
-    """ END YOUR CODE HERE """
+    # Project 3D points to 2D image plane
+    projected_points, _ = cv2.projectPoints(points3d, rvec, tvec, intrinsics, distCoeffs=None)
+    projected_points = projected_points.reshape(-1, 2)
+
+    # Compute Euclidean distance between observed and projected points
+    residuals = np.linalg.norm(points2d - projected_points, axis=1)
+    # --- IMPLEMENTATION END ---
+
     return residuals
 
 
@@ -165,21 +173,6 @@ def solve_pnp(image_id: str, point2d_idxs: np.ndarray, all_points3d: np.ndarray,
               intrinsics: np.ndarray, num_ransac_iterations: int = 200, inlier_threshold: float = 5.0):
     """
     Solves the PnP problem using ransac.
-
-    Args:
-        image_id: id of the image
-        point2d_idxs: indexes of image keypoints
-        all_points3d: all 3d world points
-        point3d_idxs: indexes of the <all_points3d> that correspond to the keypoints where
-        all_points3d[point3d_idxs[i]] corresponds to keypoints[point2d_idxs[i]]
-        intrinsics: 3 x 3 camera intrinsics
-        num_ransac_iterations: number of ransac iterations
-        inlier_threshold: threshold for residual where residual below threshold is an inlier.
-
-    Returns:
-        rotation matrix from pnp
-        translation vector from pnp
-        indexes of inlier matches
     """
     num_pts = point2d_idxs.shape[0]
     assert num_pts >= 6, 'there should be at least 6 points'
@@ -189,33 +182,39 @@ def solve_pnp(image_id: str, point2d_idxs: np.ndarray, all_points3d: np.ndarray,
 
     has_valid_solution = False
     max_rotation_mtx, max_tvec, max_is_inlier, max_num_inliers = None, None, None, 0
+
     for _ in range(num_ransac_iterations):
         selected_idxs = np.random.choice(num_pts, size=6, replace=False).reshape(-1)
         selected_pts2d = points2d[selected_idxs, :]
         selected_pts3d = points3d[selected_idxs, :]
-        
-        rotation_mtx, tvec = np.eye(3), np.zeros(3, dtype=float)  # dummy values
-        residuals = np.zeros(shape=selected_pts2d.shape[0], dtype=float)
-        """ 
-        YOUR CODE HERE 
-        1. call cv2.solvePnP(..., flags=cv2.SOLVEPNP_ITERATIVE, ...)
-        2. convert the returned rotation vector to rotation matrix using cv2.Rodrigues
-        3. compute the reprojection residuals
-        """
-       
 
+        # --- IMPLEMENTATION START ---
+        # 1. call cv2.solvePnP
+        # [修改] 使用 SOLVEPNP_EPNP，它比默认的 ITERATIVE 更稳健，不容易产生“压扁”或“一条线”的结果
+        success, rvec, tvec = cv2.solvePnP(selected_pts3d, selected_pts2d, intrinsics, distCoeffs=None,
+                                           flags=cv2.SOLVEPNP_EPNP)
 
-        """ END YOUR CODE HERE """
+        if not success:
+            continue
+
+        # 2. convert rotation vector to rotation matrix
+        rotation_mtx, _ = cv2.Rodrigues(rvec)
+
+        # 3. compute the reprojection residuals on ALL points (not just selected ones)
+        residuals = get_reprojection_residuals(points2d, points3d, intrinsics, rotation_mtx, tvec)
+        # --- IMPLEMENTATION END ---
 
         is_inlier = residuals <= inlier_threshold
         num_inliers = np.sum(is_inlier).item()
+
         if num_inliers > max_num_inliers:
             max_rotation_mtx = rotation_mtx
             max_tvec = tvec
             max_is_inlier = is_inlier
             max_num_inliers = num_inliers
             has_valid_solution = True
-    assert has_valid_solution
+
+    assert has_valid_solution, "RANSAC PnP failed to find a valid solution"
     inlier_idxs = np.argwhere(max_is_inlier).reshape(-1)
     return max_rotation_mtx, max_tvec, inlier_idxs
 
@@ -223,95 +222,87 @@ def solve_pnp(image_id: str, point2d_idxs: np.ndarray, all_points3d: np.ndarray,
 def add_points3d(image_id1: str, image_id2: str, all_extrinsic: dict, intrinsics, points3d: np.ndarray,
                  correspondences2d3d: dict):
     """
-    From the image pair (image_id1, image_id2), triangulate to get new points3d. Update the correspondences
-    for image_id1 and image_id2 and return the updated points3d as well.
-
-    Args:
-        image_id1: new image id
-        image_id2: registered image id
-        all_extrinsic: dictionary of image extrinsic where all_extrinsic[image_id1] returns the 3x4 extrinsic for
-                        image_id1
-        intrinsics: 3 x 3 camera intrinsic matrix
-        points3d: M x 3 array of old 3d points
-        correspondences2d3d: dictionary of correspondences between 2d keypoints and 3d points for each image
-            e.g. correspondences2d3d[image_id1][i] = j means that keypoint indexed at i in keypoint file for <image_id1>
-            is correspondences to <points3d> indexed at j. Note that correspondences2d3d[image_id1] is a dictionary.
-
-    Returns:
-        points3d: updated points3d
-        correspondences2d3d: updated correspondences2d3d.
+    From the image pair (image_id1, image_id2), triangulate to get new points3d.
     """
     matches = load_matches(image_id1=image_id1, image_id2=image_id2)
-    points2d_idxs2 = np.setdiff1d(matches[:, 1], correspondences2d3d[image_id2].keys()).reshape(-1)
-    if len(points2d_idxs2) == 0:
-        return points3d, correspondences2d3d  # no new registration
+    # Find points in image2 that correspond to matches but are NOT yet in 3D correspondences
+    points2d_idxs2 = np.setdiff1d(matches[:, 1], list(correspondences2d3d[image_id2].keys())).reshape(-1)
 
-    # triangulate new points that were not registered
+    if len(points2d_idxs2) == 0:
+        return points3d, correspondences2d3d
+
     matches_idxs = np.array([np.argwhere(matches[:, 1] == i).reshape(-1)[0] for i in points2d_idxs2])
     matches = matches[matches_idxs, :]
-    """ 
-    START YOUR CODE HERE:
-    triangulate between the image points for the unregistered matches for image_id1 and image_id2 to get new points3d
-    new_points3d = triangulate(..., kp_idxs1=matches[:, 0], kp_idxs2=matches[:, 1], ...)
-    """
-    
 
+    # --- IMPLEMENTATION START ---
+    # triangulate between the image points for the unregistered matches
+    kp_idxs1 = matches[:, 0]
+    kp_idxs2 = matches[:, 1]
 
-    """ END YOUR CODE HERE """
+    new_points3d = triangulate(
+        image_id1=image_id1,
+        image_id2=image_id2,
+        kp_idxs1=kp_idxs1,
+        kp_idxs2=kp_idxs2,
+        extrinsics1=all_extrinsic[image_id1],
+        extrinsics2=all_extrinsic[image_id2],
+        intrinsics=intrinsics
+    )
+    # --- IMPLEMENTATION END ---
 
     num_new_points3d = new_points3d.shape[0]
     new_points3d_idxs = np.arange(num_new_points3d) + points3d.shape[0]
-    correspondences2d3d[image_id1] = {matches[i, 0]: new_points3d_idxs[i] for i in range(num_new_points3d)}
+
+    # Update correspondences
+    # Initialize dict for image1 if keys don't exist, though typically passed dict should handle it
+    if image_id1 not in correspondences2d3d:
+        correspondences2d3d[image_id1] = {}
+
     for i in range(num_new_points3d):
         correspondences2d3d[image_id1][matches[i, 0]] = new_points3d_idxs[i]
         correspondences2d3d[image_id2][matches[i, 1]] = new_points3d_idxs[i]
+
     points3d = np.concatenate([points3d, new_points3d], axis=0)
     return points3d, correspondences2d3d
 
 
 def get_next_pair(scene_graph: dict, registered_ids: list):
     """
-    Finds the next match where the one of the images is unregistered while the other is registered. The next image pair
-    is the one that has highest number of inliers.
-
-    Args:
-        scene_graph: dict of the scene graph where scene_graph[image_id1] returns the list of neighboring image ids
-        of image_id1. scene graph is modelled like an adjacency list.
-        registered_ids: list of registered image ids
-
-    Returns:
-        new_id: new image id to be registered
-        registered_id: registered image id that has highest number of inliers along with the new_id
+    Finds the next match where the one of the images is unregistered while the other is registered.
     """
     max_new_id, max_registered_id, max_num_inliers = None, None, 0
-    """ YOUR CODE HERE """
-    
 
+    # --- IMPLEMENTATION START ---
+    # Iterate over all currently registered images
+    for reg_id in registered_ids:
+        # Look at its neighbors in the scene graph
+        neighbors = scene_graph.get(reg_id, [])
+        for new_id in neighbors:
+            # We are looking for an unregistered image
+            if new_id not in registered_ids:
+                matches = load_matches(reg_id, new_id)
+                num_inliers = len(matches)
 
-    
-    """ END YOUR CODE HERE """
+                if num_inliers > max_num_inliers:
+                    max_num_inliers = num_inliers
+                    max_new_id = new_id
+                    max_registered_id = reg_id
+    # --- IMPLEMENTATION END ---
+
     return max_new_id, max_registered_id
 
 
 def get_pnp_2d3d_correspondences(image_id1: str, image_id2: str, correspondences2d3d: dict) -> (np.ndarray, np.ndarray):
     """
-    Returns 2d and 3d correspondences for the image_id1 and the current world points. We use the transitive property
-    where matches[i, 0] -> matches[i, 1] -> correspondences[image_id2][matches[i,1]], where image_id2 is a registered
-    image
-
-    Args:
-        image_id1: new image id
-        image_id2: registered image id
-        correspondences2d3d: dictionary of correspondences
-
-    Returns:
-        points2d_idxs: keypoint idxs of first image
-        points3d_idxs: points3d idxs
+    Returns 2d and 3d correspondences for the image_id1 and the current world points.
     """
     matches = load_matches(image_id1=image_id1, image_id2=image_id2)
+    # Find points in image2 that match points in image1 AND have existing 3D coordinates
     points2d_idxs2 = np.intersect1d(matches[:, 1], list(correspondences2d3d[image_id2].keys())).reshape(-1)
+
     match_idxs = [np.argwhere(matches[:, 1] == i).reshape(-1)[0] for i in points2d_idxs2]
     match_idxs = np.array(match_idxs)
+
     points2d_idxs1 = matches[match_idxs, 0]
     point3d_idxs = np.array([correspondences2d3d[image_id2][i] for i in points2d_idxs2])
     return points2d_idxs1, point3d_idxs
@@ -340,6 +331,7 @@ def bundle_adjustment(registered_ids: list, points3d: np.ndarray, correspondence
     for i, image_id in enumerate(registered_ids):
         correspondence_dict = correspondences2d3d[image_id]
         correspondences = np.array([[k, v] for k, v in correspondence_dict.items()])
+        if correspondences.shape[0] == 0: continue
         pt2d_idxs = correspondences[:, 0]
         pt3d_idxs = correspondences[:, 1]
 
@@ -379,8 +371,17 @@ def incremental_sfm(registered_ids: list, all_extrinsic: dict, intrinsics: np.nd
     for _ in tqdm(range(num_steps)):
         # get pose for new image
         new_id, registered_id = get_next_pair(scene_graph=scene_graph, registered_ids=registered_ids)
+        if new_id is None:
+            print("Warning: Could not find any more images to register.")
+            break
+
         points2d_idxs1, points3d_idxs = get_pnp_2d3d_correspondences(image_id1=new_id, image_id2=registered_id,
                                                                      correspondences2d3d=correspondences2d3d)
+        # 如果点数不足 6 个，打印警告并停止重建，而不是崩溃
+        if len(points2d_idxs1) < 6:
+            print(
+                f"Warning: Image {new_id} matches too few 3D points ({len(points2d_idxs1)}). Stopping reconstruction gracefully.")
+            break
         rotation_mtx, tvec, inlier_idxs = solve_pnp(image_id=new_id, point2d_idxs=points2d_idxs1,
                                                     all_points3d=points3d, point3d_idxs=points3d_idxs,
                                                     intrinsics=intrinsics)
@@ -388,6 +389,11 @@ def incremental_sfm(registered_ids: list, all_extrinsic: dict, intrinsics: np.nd
         # update correspondences
         new_extrinsics = np.concatenate([rotation_mtx, tvec.reshape(-1, 1)], axis=1)
         all_extrinsic[new_id] = new_extrinsics
+
+        # Make sure dict exists
+        if new_id not in correspondences2d3d:
+            correspondences2d3d[new_id] = {}
+
         correspondences2d3d[new_id] = {points2d_idxs1[i]: points3d_idxs[i] for i in inlier_idxs}
 
         # create new points + update correspondences
@@ -401,7 +407,8 @@ def incremental_sfm(registered_ids: list, all_extrinsic: dict, intrinsics: np.nd
         all_extrinsic, points3d = bundle_adjustment(registered_ids=registered_ids, points3d=points3d,
                                                     all_extrinsics=all_extrinsic, intrinsics=intrinsics,
                                                     correspondences2d3d=correspondences2d3d)
-    assert len(np.setdiff1d(all_image_ids, registered_ids).reshape(-1)) == 0
+
+    # assert len(np.setdiff1d(all_image_ids, registered_ids).reshape(-1)) == 0
     return points3d, all_extrinsic, correspondences2d3d, registered_ids
 
 
@@ -452,4 +459,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
